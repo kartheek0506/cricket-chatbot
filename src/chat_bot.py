@@ -1,72 +1,71 @@
-import torch
-import pickle
-import pandas as pd
-import os
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import LabelEncoder
-from train_bot import ChatbotModel
+from src.train_bot import load_data
+from src.utils.preprocessing import clean_text
+from src.utils.similarity import SimilarityMatcher
+import logging
 
-# ✅ Define file paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "../models")
-DATA_DIR = os.path.join(BASE_DIR, "../data")
+# -----------------------------
+# Logging Configuration
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-# ✅ Ensure all required files exist before proceeding
-vectorizer_path = os.path.join(MODEL_DIR, "vectorizer.pkl")
-label_encoder_path = os.path.join(MODEL_DIR, "label_encoder.pkl")
-model_path = os.path.join(MODEL_DIR, "chatbot_model.pth")
-csv_path = os.path.join(DATA_DIR, "cricketfaqs.csv")
-
-for file_path in [vectorizer_path, label_encoder_path, model_path, csv_path]:
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"❌ Error: Required file not found -> {file_path}")
-
-# ✅ Load trained components safely
-with open(vectorizer_path, "rb") as f:
-    vectorizer = pickle.load(f)
-with open(label_encoder_path, "rb") as f:
-    label_encoder = pickle.load(f)
-
-# ✅ Load trained chatbot model
-input_size = vectorizer.transform([""]).shape[1]
-model = ChatbotModel(input_size=input_size, hidden_size=64, output_size=len(label_encoder.classes_))
-model.load_state_dict(torch.load(model_path))
-model.eval()
-
-# ✅ Load dataset safely with error handling
+# -----------------------------
+# Load Data (One-Time)
+# -----------------------------
 try:
-    df = pd.read_csv(csv_path, encoding="utf-8", on_bad_lines="skip")  # Skip problematic lines
+    questions, answers = load_data()
+    matcher = SimilarityMatcher(questions)
+    logging.info("Chatbot initialized successfully.")
 except Exception as e:
-    raise RuntimeError(f" Error reading CSV file: {e}")
+    logging.error(f"Error during initialization: {str(e)}")
+    raise e
 
-# ✅ Debugging: Print first few rows to check data format
-print("\n First 5 rows of CSV data:\n", df.head())
 
-# ✅ Standardize column names (case-insensitive handling)
-expected_columns = {"question": "question", "Question": "question", "answer": "answer", "Answer": "answer"}
-df.rename(columns={col: expected_columns[col] for col in df.columns if col in expected_columns}, inplace=True)
+# -----------------------------
+# Chatbot Response Function
+# -----------------------------
+def get_response(user_input: str) -> str:
+    try:
+        logging.info(f"User Input: {user_input}")
 
-# ✅ Validate required columns
-if "question" not in df.columns or "answer" not in df.columns:
-    raise KeyError("Error: CSV file must contain 'question' and 'answer' columns.")
+        # -----------------------------
+        # Edge Case: Empty Input
+        # -----------------------------
+        if not user_input or not user_input.strip():
+            logging.warning("Empty input received")
+            return "Please enter a valid question."
 
-questions = df["question"].values
-answers = df["answer"].values
+        # -----------------------------
+        # Preprocessing
+        # -----------------------------
+        cleaned_input = clean_text(user_input)
 
-# ✅ Function to get bot response
-def get_response(user_input):
-    X_input = vectorizer.transform([user_input]).toarray()
-    with torch.no_grad():
-        output = model(torch.tensor(X_input, dtype=torch.float32))
-    predicted_index = torch.argmax(output, dim=1).item()
-    return label_encoder.inverse_transform([predicted_index])[0]
+        # -----------------------------
+        # Similarity Matching
+        # -----------------------------
+        best_index, score = matcher.find_best_match(cleaned_input)
 
-# ✅ Chat Loop
-print("\n Chatbot is ready! Type 'exit' to stop.\n")
-while True:
-    user_input = input("You: ")
-    if user_input.lower() == "exit":
-        print(" Exiting chatbot. Have a great day!")
-        break
-    response = get_response(user_input)
-    print("Bot:", response)
+        logging.info(f"Best Match Index: {best_index}")
+        logging.info(f"Similarity Score: {score}")
+
+        # -----------------------------
+        # Confidence Threshold
+        # -----------------------------
+        THRESHOLD = 0.3
+
+        if score < THRESHOLD:
+            logging.warning("Low confidence response triggered")
+            return "I'm not sure about that. Try asking something related to cricket."
+
+        # -----------------------------
+        # Return Best Answer
+        # -----------------------------
+        response = answers[best_index]
+
+        return response
+
+    except Exception as e:
+        logging.error(f"Runtime error: {str(e)}")
+        return "Something went wrong. Please try again."
